@@ -1,0 +1,124 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    /**
+     * CORE PHILOSOPHY
+     * This ruleset enforces a strict "User-Ownership" model designed for privacy and authorization independence.
+     * Every piece of data is nested under a specific user's path, ensuring that users can only access
+     * and modify their own information.
+     *
+     * DATA STRUCTURE
+     * The hierarchy is strictly organized under `/users/{userId}`.
+     * - /users/{userId}: The primary profile for a user.
+     * - /users/{userId}/tasks/{taskId}: Private tasks belonging to the user.
+     * - /users/{userId}/reminders/{reminderId}: Private reminders belonging to the user.
+     * - /users/{userId}/aiAssistantMessages/{messageId}: Private AI chat history for the user.
+     *
+     * KEY SECURITY DECISIONS
+     * 1. Authorization Independence: Every document contains a `userId` or `id` field that matches the 
+     *    parent path's `{userId}` wildcard. Rules validate this link to prevent data cross-talk.
+     * 2. No Public Listing: Listing users is strictly forbidden. A user can only fetch their own profile.
+     * 3. Prototyping Flexibility: While ownership is strictly enforced, the specific shape of 
+     *    content fields (titles, descriptions, priorities) is not validated to allow for rapid iteration.
+     * 4. Relational Integrity: On creation, the rules force the client to set the correct `userId` 
+     *    field within the document data to match the authenticated user's ID.
+     */
+
+    // --- Global Helper Functions ---
+
+    /** @description Checks if the request is from an authenticated user. */
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    /** @description Checks if the authenticated user's UID matches the provided userId. */
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    /** @description Verifies ownership and ensures the document actually exists for write operations. */
+    function isExistingOwner(userId) {
+      return resource != null && isOwner(userId);
+    }
+
+    // --- Collection Rules ---
+
+    /**
+     * @description Rules for User Profiles. Allows users to manage their own profile info.
+     * @path /users/{userId}
+     * @allow (create) if auth.uid == 'user123' and request.resource.data.id == 'user123'
+     * @deny (list) if any user attempts to list all users in the system.
+     * @principle Validates that the document ID and internal 'id' field match the Authenticated UID.
+     */
+    match /users/{userId} {
+      allow get: if isOwner(userId);
+      allow list: if false; // Users should not be able to list other users.
+      
+      allow create: if isOwner(userId) 
+                    && request.resource.data.id == userId;
+      
+      allow update: if isExistingOwner(userId) 
+                    && request.resource.data.id == resource.data.id;
+      
+      allow delete: if isExistingOwner(userId);
+
+      /**
+       * @description Rules for Tasks. Tasks are private sub-collections of a user.
+       * @path /users/{userId}/tasks/{taskId}
+       * @allow (list) if auth.uid == 'user123' and path is /users/user123/tasks
+       * @deny (create) if auth.uid == 'user123' but request.resource.data.userId == 'hacker456'
+       * @principle Ensures tasks are linked to the parent user via path and internal userId field.
+       */
+      match /tasks/{taskId} {
+        allow get, list: if isOwner(userId);
+        
+        allow create: if isOwner(userId) 
+                      && request.resource.data.userId == userId;
+        
+        allow update: if isExistingOwner(userId) 
+                      && request.resource.data.userId == resource.data.userId;
+        
+        allow delete: if isExistingOwner(userId);
+      }
+
+      /**
+       * @description Rules for Reminders. Reminders are private sub-collections of a user.
+       * @path /users/{userId}/reminders/{reminderId}
+       * @allow (get) if auth.uid == 'user123' fetches their own reminder.
+       * @deny (update) if a user attempts to change the 'userId' field of a reminder.
+       * @principle Enforces immutability of the ownership link (userId) during updates.
+       */
+      match /reminders/{reminderId} {
+        allow get, list: if isOwner(userId);
+        
+        allow create: if isOwner(userId) 
+                      && request.resource.data.userId == userId;
+        
+        allow update: if isExistingOwner(userId) 
+                      && request.resource.data.userId == resource.data.userId;
+        
+        allow delete: if isExistingOwner(userId);
+      }
+
+      /**
+       * @description Rules for AI Assistant Messages. Private conversation history.
+       * @path /users/{userId}/aiAssistantMessages/{messageId}
+       * @allow (create) if auth.uid == 'user123' saves a new message to their own history.
+       * @deny (get) if 'userABC' tries to read 'userXYZ's chat history.
+       * @principle Provides strict structural segregation for sensitive AI interactions.
+       */
+      match /aiAssistantMessages/{messageId} {
+        allow get, list: if isOwner(userId);
+        
+        allow create: if isOwner(userId) 
+                      && request.resource.data.userId == userId;
+        
+        allow update: if isExistingOwner(userId) 
+                      && request.resource.data.userId == resource.data.userId;
+        
+        allow delete: if isExistingOwner(userId);
+      }
+    }
+  }
+}
